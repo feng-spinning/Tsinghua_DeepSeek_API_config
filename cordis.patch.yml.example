@@ -1,0 +1,86 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+#
+# This file is safe to share: it contains no secret data. The Tsinghua token
+# lives in the credential store and is referenced by name (apiKeyEnv).
+- id: ui-chat
+  name: "@deepseek-ai/dsh-client-ui-chat"
+  config:
+    transcriptView: standard
+    performanceUsage: detailed
+- id: ui-settings
+  name: "@deepseek-ai/dsh-client-ui-settings"
+  config:
+    enabled: true
+- id: ui-settings-account
+  name: "@deepseek-ai/dsh-client-ui-settings-account"
+  config:
+    version: 1
+    step: done
+    usage: detailed
+    developerTools: true
+    purpose: null
+    process: standard
+    completion: api-key
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: tsinghua
+    model: DeepSeek-V4.1-Flash
+    reasoningEffort: high
+# Tsinghua DeepSeek service (madmodel.cs.tsinghua.edu.cn).
+# OpenAI-compatible /v1/chat/completions gateway, so it rides the dormant
+# pi-ai multi-provider adapter rather than the official DeepSeek Messages route.
+# The token lives in the credential store as TSINGHUA_DEEPSEEK_API_KEY and is
+# resolved per request, so refreshing it needs no profile edit.
+#
+# `api` is a ROUTE-level field. dsh-llm-pi-ai resolves
+#   api = request.api ?? base?.api ?? routeApi
+# and refuses a hand-declared route without it:
+#   model "..." needs an api; the installed catalog does not describe it
+# Declaring `api` on the model instead has no effect.
+#
+# contextWindow is measured, not guessed: the endpoint accepted prompts of
+# 400,853 / 600,919 / 1,000,136 tokens (each returning the sentinel placed at the
+# very end of the prompt, so nothing was silently truncated), and rejected a
+# 1.05M prompt with HTTP 400 "This model's maximum context length is 1048576
+# tokens ... max_model_len=max_total_tokens=1048576". The earlier 262,144 was
+# dsh-llm-pi-ai's fallback for undescribed models, not this server's limit.
+# max_tokens is the output reservation: the router counts input + output against
+# that same 1,048,576 ceiling, so the two cannot both equal it.
+- id: llm-pi-ai
+  config:
+    providers:
+      tsinghua:
+        apiKeyEnv: TSINGHUA_DEEPSEEK_API_KEY
+        displayName: Tsinghua DeepSeek
+        api: openai-completions
+        baseURL: https://madmodel.cs.tsinghua.edu.cn/v1
+        reasoning: high
+        models:
+          - id: DeepSeek-V4.1-Flash
+            name: Tsinghua_DeepSeek_v41
+            contextWindow: 1048576
+            maxTokens: 131072
+            input:
+              - text
+            # The adapter omits the reasoning control entirely for a model with
+            # no declared reasoning metadata (every hand-declared route), so the
+            # four levels must be declared to appear in the UI.
+            # Measured: reasoning_effort accepts low/high/max/none; `none` really
+            # stops thinking (0 reasoning tokens). minimal/medium/xhigh -> 400.
+            reasoningEfforts:
+              off: none
+              low: low
+              high: high
+              max: max
+            compat:
+              supportsReasoningEffort: true
+              maxTokensField: max_tokens
+              # Pin the OpenAI style. The gateway ignores `thinking:{...}`
+              # completely (it still spent 20 reasoning tokens with
+              # {type:disabled}), while top-level reasoning_effort works.
+              thinkingFormat: openai
+        defaultContextWindow: 1048576
+        defaultMaxTokens: 131072

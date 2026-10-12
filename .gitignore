@@ -1,0 +1,14 @@
+# Local token file. Never commit it.
+tsinghua_token.txt
+tsinghua_token.txt.*
+!tsinghua_token.txt.placeholder
+
+# Credential store and its backups. Never commit them.
+.credentials.yaml
+.credentials.yaml.*
+*.bak-*
+*.before-tsinghua
+
+# Local scratch
+testhome/
+.~lock.*
