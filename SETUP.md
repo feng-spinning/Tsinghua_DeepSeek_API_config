@@ -1,129 +1,200 @@
-# How to Configure the Tsinghua DeepSeek Route in DSH Desktop
+# DSH Desktop 接入清华 DeepSeek：配置与使用说明
 
-## About this document
+## 关于本文
 
-This document tells you how to use the Tsinghua DeepSeek service in DSH Desktop.
-The document gives the procedure from the token download to the first test
-request.
+本文说明如何在 DSH Desktop 里使用清华的 DeepSeek 服务
+（`madmodel.cs.tsinghua.edu.cn`），以及如何每 24 小时更换一次 token。
 
-The text obeys the principles of ASD-STE100 Simplified Technical English:
-short sentences, one instruction for each sentence, the active voice, and one
-word for one meaning. See [ASD-STE100](https://www.asd-europe.org/standards-specifications/simplified-technical-english/).
+本文面向操作的人，用中文写作。写作风格参照 ASD-STE100 简化技术英语的
+原则：句子短、一句一个意思、多用主动语态、一个词只表达一个意思。
 
-### Find the right procedure
+完整的配置记录、排错过程和技术细节在 [AGENT_NOTES.md](AGENT_NOTES.md)（英文）。
 
-Use this table to find your procedure.
+### 先看哪一节
 
-| Your task | Go to |
+| 你的任务 | 去这一节 |
 |---|---|
-| Configure the route on a new computer | Section 1 |
-| Replace an expired token | Section 2 |
-| Move the configuration to an other computer | Section 3 |
-| Repair a problem | Section 5 |
+| 第一次配置（换新电脑做一次） | 第 1 节 |
+| 换 token（每 24 小时一次） | 第 2 节 |
+| 把配置搬到另一台电脑或别的用户 | 第 3 节 |
+| 出问题要修 | 第 6 节 |
+| 想知道为什么要这样配 | 第 0 节 |
 
-**Important:** Section 1 is necessary one time only. Section 2 is necessary
-every 24 hours.
+**注意：** 第 1 节只需做一次。第 2 节每 24 小时做一次。
 
-### Words in this document
+---
 
-| Word | Meaning |
+## 第 0 节 配置逻辑总览（先读这一节）
+
+这一节讲清楚"为什么这样配"。看懂这一节，后面的步骤就不会记错。
+
+### 0.1 一句话逻辑
+
+DSH 不认识清华这个端点，所以要给它接一个**翻译器**；
+清华的 token 每 24 小时过期，所以要把它**放在门外而不是写进墙里**；
+"模型能做什么"不会自动被知道，所以每一项能力都要**先实测、再声明**。
+
+全部配置就是这三件事。
+
+### 0.2 四个东西，各管一件事
+
+| 东西 | 是什么 | 谁写它 | 里面有没有密钥 |
+|---|---|---|---|
+| `tsinghua_token.txt` | 你放 token 的纯文本文件 | **你手动粘贴** | 有 |
+| `.credentials.yaml` | DSH 的凭据库 | **脚本自动写入** | 有 |
+| `cordis.patch.yml` | 配置文件（profile） | 你或界面 | **没有**，只有一个名字 |
+| 清华端点 | 学校的服务器 | 学校 | — |
+
+### 0.3 数据流：从你粘贴到模型应答
+
+```
+① 你从 madmodel 控制台复制 token
+        ↓  手动粘贴
+② tsinghua_token.txt                    ← 唯一的"人工入口"
+        ↓  运行 Sync-TsinghuaToken.ps1（校验格式 + 校验有效期 + 写入）
+③ .credentials.yaml 里 refs.TSINGHUA_DEEPSEEK_API_KEY
+        ↓  DSH 每次发请求时按名字取用
+④ cordis.patch.yml 里的 apiKeyEnv: TSINGHUA_DEEPSEEK_API_KEY
+        ↓  发到 https://madmodel.cs.tsinghua.edu.cn/v1
+⑤ 清华端点 → 返回模型结果
+```
+
+**关键点：配置文件里只写 token 的名字，不写 token 本身。**
+
+### 0.4 为什么 token 要"放在门外"
+
+这里有三层隔离，缺一层都会出问题：
+
+1. **写进配置文件会泄密。** `cordis.patch.yml` 是要分享、要提交到
+   GitHub、要复制到别的电脑的。token 一旦写进去，就跟着一起泄露出去了。
+2. **写进配置文件也不方便。** token 每 24 小时换一次。如果写在配置文件里，
+   每天都要改配置文件、每天都要重启应用。
+3. **名字是稳定的，值是易变的。** 配置文件里写
+   `apiKeyEnv: TSINGHUA_DEEPSEEK_API_KEY` 这个名字，名字永远不变；
+   真正的 token 放在凭据库里，每天换值就行。**配置一次，之后只换值。**
+
+DSH 的凭据库有一个重要特性：**token 是每次发请求时才去取的，不是启动时
+读一次就缓存住。** 所以换完 token 不需要重启应用，下一次提问就已经用新
+token 了。
+
+### 0.5 为什么"必须声明能力"
+
+**模型会做什么，DSH 不会自己知道。** 我们这条路由是"手工声明的路由"，
+pi-ai 适配器在已安装的模型目录里查不到它，查不到就问不出能力，于是全部按
+最保守的假设处理。
+
+这个假设会体现在三个地方，每一个都必须靠配置显式声明才能打开：
+
+| 不声明会怎样 | 后果 |
 |---|---|
-| **harness home** | The folder that holds the DSH data. The usual path is `$env:USERPROFILE\.dsh` on Windows and `~/.dsh` on other systems. The environment variable `DSH_HOME` can change it. |
-| **profile** | One DSH configuration set. This document uses the profile `desktop`. |
-| **patch file** | The file that holds your configuration changes. Its path is `<harness home>\profiles\desktop\cordis.patch.yml`. |
-| **credential store** | The file that holds the secret values. Its path is `<harness home>\.credentials.yaml`. |
-| **token file** | The text file that holds the token. You make this file. |
-| **token** | The login token from the Tsinghua DeepSeek service. |
-| **route** | One connection to a model service. This document uses the route `tsinghua`. |
+| 不写 `api`（协议） | **路由注册不上**，模型选择器里根本看不到这个模型 |
+| 不写 `reasoningEfforts` | **没有思考等级控件**（Off/Low/High/Max 不显示） |
+| 不写 `contextWindow` | 窗口显示 262,144（这是 DSH 的兜底默认值，不是服务器的真实值） |
+| 不写 `input: image` | **图片发不出去**（详见第 5 节） |
 
-## Understand how the system works
+**所以"端点支持"和"DSH 让你用"是两件事。**
 
-The system has four parts. The parts work in this sequence:
+### 0.6 为什么每个值都要实测
 
-1. You copy a new token from the Tsinghua service.
-2. You put the token in the **token file**.
-3. You run the script `Sync-TsinghuaToken.ps1`. The script moves the token into
-   the **credential store**.
-4. DSH reads the token from the credential store. DSH reads the token again for
-   each request.
+配置里的每一个数字和每一项能力，都是打真实请求量出来的，不是猜的、
+也不是照抄文档的。原因是这个端点给的说明书和实际行为不一致：
 
-The **patch file** holds the route configuration. The patch file holds only the
-**name** of the credential. The patch file never holds the token itself.
+| 说明书说 | 实测结果 |
+|---|---|
+| 可用模型是 `DeepSeek-R1-671B` / `DeepSeek-R1-32B` | **这两个模型不存在**；实际可用的是 `DeepSeek-V4.1-Flash` |
+| token 有效期 5 小时 | JWT 里写的是 **24 小时** |
+| 未说明上下文长度 | 实测 **1,048,576 token** |
+| 未说明推理档位 | 实测只接受 `none` / `low` / `high` / `max` |
+| 未说明图像支持 | 实测**支持**，而且真的能看懂图像 |
 
-This design has two important results:
+还有两个坑值得记住：
 
-* You must replace the token every 24 hours. You do not change the patch file.
-* You can give the patch file to an other person. The patch file contains no
-  secret data.
+* **模型不存在时，网关返回的是 HTTP 200**，错误藏在响应体里：
+  `{"status":10001,"message":"模型不存在","success":false}`。
+  所以**只看状态码会误判成功**。
+* **`thinking` 参数被网关完全忽略**：即使传
+  `thinking:{type:disabled}`，模型仍然消耗了思考 token。真正能关掉思考的
+  只有 `reasoning_effort=none`。所以配置里把发送格式**锁死**成 openai 风格。
 
-### The token lifecycle
+### 0.7 实测出来的能力表
 
-The Tsinghua service gives a token that is valid for 24 hours. After 24 hours,
-the service refuses the token. Then DSH shows an authentication error.
+| 能力 | 结果 | 配置里对应哪一项 |
+|---|---|---|
+| 函数调用（Agent 工具） | 支持，流式和非流式都支持 | 无需声明，协议自带 |
+| 多轮工具往返 | 支持 | 无需声明 |
+| 思考等级 | `none` / `low` / `high` / `max` | `reasoningEfforts` |
+| 上下文长度 | 1,048,576（输入+输出合计） | `contextWindow` + `maxTokens` |
+| **图像输入** | **支持，能正确识别图像内容** | `input: [text, image]` |
+| 提示缓存 | 支持 | 无需声明 |
+| 限流 | 30,000 次/分钟 | 无需声明 |
 
-The **token file** is the one place for the manual step. You copy the new token
-into this file. The script does the rest.
+### 0.8 完成的标志
 
-## Section 1: Configure the route for the first time
+配置成功的标志有三个，缺一个都说明没配好：
 
-Do these steps one time on each computer.
+1. 模型选择器里出现 **Tsinghua DeepSeek** 组，里面有
+   **Tsinghua_DeepSeek_v41**。
+2. 该模型的上下文显示 **1M**，并且 Effort 行有
+   **Off / Low / High / Max** 四档。
+3. 让它读一个文件（或读一张图），它能调用工具并正确回答。
 
-### Step 1: Get the token
+---
 
-1. Start a browser.
-2. Open the Tsinghua DeepSeek model system.
-3. Log in with your school account.
-4. Find the page that shows the token. The page usually has a **Copy** button.
-5. Copy the complete token.
+## 第 1 节 第一次配置
 
-**Note:** The token is a long string of letters, digits, dots, and hyphens. The
-usual length is between 200 and 400 characters. The token has three parts that
-dots separate.
+在新电脑上做一次。
 
-**Caution:** Do not put the token in an email, a chat message, or a document
-that other persons can read. The token is a password for your school account.
+### 步骤 1：拿到 token
 
-### Step 2: Make the token file
+1. 打开浏览器。
+2. 进入清华 DeepSeek 大模型系统的页面。
+3. 用学校账号登录。
+4. 找到显示 token 的地方，通常有一个**复制**按钮。
+5. 点复制，把完整 token 复制下来。
 
-1. Open a text editor. Use Notepad on Windows.
-2. Paste the token.
-3. Do not add a second line. Do not add quotation marks.
-4. Save the file as plain text with the name `tsinghua_token.txt`.
+**token 长什么样：** 一长串由字母、数字、点（`.`）和连字符（`-`）组成的
+字符，长度通常 200～400，中间有两个点把它分成三段。
 
-Put the file near the script `Sync-TsinghuaToken.ps1`. The default path is the
-same folder as the script.
+**警告：** 不要把 token 发到邮件、聊天记录或任何别人能看到的地方。
+这个 token 等于你学校账号的密码。
 
-**Note:** The token file must have the UTF-8 encoding. Notepad uses UTF-8 by
-default.
+### 步骤 2：建立 token 文件
 
-### Step 3: Stop the DSH Desktop application
+1. 打开记事本。
+2. 粘贴 token。
+3. **不要**加第二行，**不要**加引号。
+4. 保存为纯文本文件，文件名 `tsinghua_token.txt`。
 
-1. Close the DSH Desktop window.
-2. Make sure that the process stops. Open Task Manager and look for the process
-   `DeepSeek Harness`.
+把这个文件放在 `Sync-TsinghuaToken.ps1` 所在目录（脚本默认就找这里）。
 
-**Note:** This step is safe, but it is not always necessary. The application
-reads the credential store again for each request. Stop the application if you
-have a problem.
+顺便说明：如果你复制时多带了 `Bearer ` 前缀或引号，脚本会自动去掉，
+不用手工清理。
 
-### Step 4: Find the harness home
+### 步骤 3：关掉 DSH Desktop
 
-1. Open a terminal. Use Windows PowerShell on Windows.
-2. Type this command:
+1. 关闭 DSH Desktop 窗口。
+2. 确认进程也退出了（任务管理器里查 `DeepSeek Harness`）。
+
+这一步不是必须的（token 是每次请求时读的），但第一次配置时做一次更省事。
+
+### 步骤 4：找到 harness home
+
+1. 打开 Windows PowerShell。
+2. 输入：
 
 ```powershell
 $env:USERPROFILE + "\.dsh"
 ```
 
-3. Look at the result. This folder is the harness home.
-4. Make sure that the file `.credentials.yaml` is in this folder.
+3. 这个目录就是 harness home。
+4. 确认里面有 `.credentials.yaml`。
 
-**Note:** If the file `.credentials.yaml` is not there, start DSH Desktop one
-time and close it again. The application makes the file at the first start.
+如果这个文件不存在，就先启动一次 DSH Desktop 再关掉，应用会在第一次启动时
+创建它。
 
-### Step 5: Make a copy of the old files
+### 步骤 5：备份原来的配置
 
-1. Type these commands. Replace `<HARNESS HOME>` with your harness home.
+把 `<HARNESS HOME>` 换成你上一步得到的路径：
 
 ```powershell
 $h = "<HARNESS HOME>"
@@ -131,45 +202,38 @@ Copy-Item "$h\.credentials.yaml" "$h\.credentials.yaml.before-tsinghua"
 Copy-Item "$h\profiles\desktop\cordis.patch.yml" "$h\profiles\desktop\cordis.patch.yml.before-tsinghua"
 ```
 
-2. Look at the two new files. The two files are your rollback data.
+这两个副本就是回滚用的。
 
-### Step 6: Put the token in the credential store
+### 步骤 6：把 token 写进凭据库
 
-1. Open a terminal in the folder that holds the script.
-2. Type this command to test the token. This command does not write data:
+在脚本所在目录打开终端：
 
 ```powershell
 .\Sync-TsinghuaToken.ps1 -DryRun
 ```
 
-3. Look at the result. The result shows the token length, the expiry time, and a
-   fingerprint. The result does not show the token.
-4. Make sure that the expiry time is in the future. The time left must be more
-   than 0 minutes.
-5. Type this command to write the token:
+先空的跑一次（不写入）。输出会显示 token 长度、过期时间和一个指纹，
+**不会显示 token 本身**。确认 `Time left` 是正数，然后再真正写入：
 
 ```powershell
 .\Sync-TsinghuaToken.ps1
 ```
 
-6. Look for this line in the result:
+看到这一行就算成功：
 
 ```
 Result          : OK.
 ```
 
-**If the result is not OK, go to Section 5.**
+脚本每次都做三件事：**先备份**凭据库、**保留**其他凭据条目、写完**回读
+校验**（比对指纹）。
 
-**Note:** The script makes a backup copy of the credential store before each
-write. The script keeps all other credential entries.
+### 步骤 7：把路由写进配置文件
 
-### Step 7: Add the route to the patch file
-
-1. Open the file `<harness home>\profiles\desktop\cordis.patch.yml` in a text
-   editor.
-2. Find the top-level list. The list has entries that start with `- id:`.
-3. Add these two entries. Put each entry at the first position of the list. Do
-   not change the other entries.
+1. 用文本编辑器打开
+   `<HARNESS HOME>\profiles\desktop\cordis.patch.yml`。
+2. 在文件开头的 `- id:` 列表里加入 `llm-pi-ai` 这一段
+   （直接复制仓库里的 `cordis.patch.yml.example`，它是完整可用的版本）：
 
 ```yaml
 - id: llm-pi-ai
@@ -188,6 +252,7 @@ write. The script keeps all other credential entries.
             maxTokens: 131072
             input:
               - text
+              - image
             reasoningEfforts:
               off: none
               low: low
@@ -201,21 +266,18 @@ write. The script keeps all other credential entries.
         defaultMaxTokens: 131072
 ```
 
-**Note:** The file `cordis.patch.yml.example` in this repository holds the same
-text. You can copy the text from that file.
+3. 保存。
 
-4. Save the file.
+**注意：** YAML 用空格缩进，**不要按 Tab 键**。缩进层级要和示例一致。
 
-**Caution:** YAML uses spaces for the indentation. Do not use the Tab key. Keep
-the same indentation as the example.
+**注意：** `api: openai-completions` 必须放在 **`tsinghua` 这一层**
+（路由层），放在 `models:` 里面**不生效**。这是最容易踩的坑。
 
-### Step 8: Set the default model (optional)
+### 步骤 8：设成默认模型（可选）
 
-The route works without this step. Do this step if you want the Tsinghua model
-for each new session.
+这一步不做也能用，只是在每个新会话里要手动选一次模型。
 
-1. Find the entry `agent-default-model` in the patch file.
-2. Set the fields to these values:
+要设成默认，就改 `agent-default-model` 这一段：
 
 ```yaml
 - id: agent-default-model
@@ -226,229 +288,287 @@ for each new session.
     reasoningEffort: high
 ```
 
-**Note:** The token expires every 24 hours. A default model that points to an
-expired token causes an error in each new session. Use the model selector
-instead if you want a safe default.
+**权衡：** token 每 24 小时过期。把它设成默认模型，意味着 token 过期后每个
+新会话都会直接报认证错误。想更稳妥就保持默认模型为官方 DeepSeek，
+用模型选择器临时切到清华这条路由。
 
-### Step 9: Start the application and test the route
+### 步骤 9：启动应用并验证
 
-1. Start DSH Desktop.
-2. Open the model selector.
-3. Look for the group **Tsinghua DeepSeek**.
-4. Look for the model **Tsinghua_DeepSeek_v41**.
-5. Select the model.
-6. Look at the context value of the model. The value must be **1M** or
-   **1,048,576**.
-7. Look at the effort control. The control must show **Off**, **Low**,
-   **High**, and **Max**.
-8. Send a message to the model. For example: "Read the file README.md".
-9. Look at the answer. An answer that uses a tool shows that the route is
-   correct.
+1. 启动 DSH Desktop。
+2. 打开模型选择器。
+3. 找到 **Tsinghua DeepSeek** 组 → **Tsinghua_DeepSeek_v41**。
+4. 选中它，确认上下文显示 **1M**（1,048,576）。
+5. 确认 Effort 行有 **Off / Low / High / Max** 四档。
+6. 发一条会用到工具的指令，例如"读一下 README.md"。
+7. 能正确调用工具并回答，就说明整条链路通了。
 
-## Section 2: Replace the token (each 24 hours)
+---
 
-The token expires every 24 hours. Do these steps after each expiry.
+## 第 2 节 每 24 小时换 token
 
-1. Get a new token. See Section 1, Step 1.
-2. Put the new token in the token file. See Section 1, Step 2. Replace the old
-   text fully.
-3. Type this command:
+token 每 24 小时过期，过期后 DSH 会报认证错误。换 token 只做三件事：
+
+1. 重新复制一个新 token（同第 1 节步骤 1）。
+2. 把 `tsinghua_token.txt` 里的内容**整行替换**成新 token。
+3. 运行：
 
 ```powershell
 .\Sync-TsinghuaToken.ps1
 ```
 
-4. Look for this line in the result:
+看到 `Result : OK.` 就完成了。**不需要改配置文件，不需要重启应用。**
 
-```
-Result          : OK.
-```
-
-5. Continue your work. A restart of the application is not necessary.
-
-**Note:** Do not change the patch file in this procedure.
-
-### Find the expiry time
-
-Type this command to see the time that is left:
+### 查还剩多久
 
 ```powershell
 .\Sync-TsinghuaToken.ps1 -DryRun
 ```
 
-The line `Time left` shows the minutes.
+看输出里的 `Time left`（单位：分钟）。负数说明已经过期。
 
-## Section 3: Move the configuration to an other computer
+---
 
-The patch file contains no secret data. You can move the patch file to an other
-computer and an other user.
+## 第 3 节 搬到另一台电脑或另一个用户
 
-Do these steps on the new computer:
+**配置文件可以搬，凭据库不能搬。** 原因见第 0.4 节：配置文件里只有 token
+的名字，没有 token 本身。
 
-1. Copy these files to the new computer:
-   * `cordis.patch.yml` → the profile folder of the new harness home
-   * `Sync-TsinghuaToken.ps1` → any folder
-2. Start DSH Desktop one time. Close it again. The application makes the
-   credential store.
-3. Get your own token from the Tsinghua service.
-4. Make the token file. See Section 1, Step 2.
-5. Run the script:
+在新电脑上：
 
-```powershell
-.\Sync-TsinghuaToken.ps1
-```
+1. 把 `cordis.patch.yml` 复制到新机器的
+   `<HARNESS HOME>\profiles\desktop\` 目录。
+   如果那里已有同名文件，要把两边的条目**合并**，不要把原来的直接覆盖掉。
+2. 把 `Sync-TsinghuaToken.ps1` 复制到任意目录。
+3. 启动一次 DSH Desktop 再关掉（让凭据库生成出来）。
+4. **用你自己的账号**去清华控制台拿一个**你自己的** token。
+5. 建立 `tsinghua_token.txt`，运行脚本。
+6. 按第 1 节步骤 9 验证。
 
-6. Start DSH Desktop and test the route. See Section 1, Step 9.
+两点必须注意：
 
-**Note:** Each user needs an own token. The patch file is safe to move. The
-credential store is not safe to move.
+* **每个人要用自己的 token。** 不要拿别人的 token 跑，也不要共享凭据库——
+  token 对应的是具体某个人的校园身份。
+* **凭据库里还有一个浏览器会话签名密钥**，它和主机名、端口绑定，
+  复制到别的机器上会失效。
 
-**Note:** The token references the user account. Do not run the script of an
-other user with your token file.
+---
 
-## Section 4: Understand the configuration values
+## 第 4 节 配置项逐条说明
 
-This section explains the important values in the patch file.
-
-| Field | Value | Function |
+| 配置项 | 值 | 作用 |
 |---|---|---|
-| `apiKeyEnv` | `TSINGHUA_DEEPSEEK_API_KEY` | The name of the credential. The name must be the same in the credential store. |
-| `api` | `openai-completions` | The protocol of the service. This value is necessary at the **route** level. |
-| `baseURL` | `https://madmodel.cs.tsinghua.edu.cn/v1` | The address of the service. |
-| `reasoning` | `high` | The default thinking level for the route. |
-| `contextWindow` | `1048576` | The maximum input size. Section 4.1 gives the source of this value. |
-| `maxTokens` | `131072` | The maximum output size. |
-| `reasoningEfforts` | four entries | The thinking levels in the user interface. |
-| `thinkingFormat` | `openai` | The field that the service accepts for the thinking level. |
+| `apiKeyEnv` | `TSINGHUA_DEEPSEEK_API_KEY` | token 在凭据库里的名字。两边必须一致。 |
+| `api` | `openai-completions` | 协议。**必须写在路由层（`tsinghua` 下一层）**。 |
+| `baseURL` | `https://madmodel.cs.tsinghua.edu.cn/v1` | 端点地址。DSH 会自己补 `/chat/completions`。 |
+| `reasoning` | `high` | 这条路由的默认思考档位。 |
+| `displayName` | `Tsinghua DeepSeek` | 模型选择器里显示的分组名。 |
+| `models[].id` | `DeepSeek-V4.1-Flash` | 端点侧真正的模型 id。**必须写这个**。 |
+| `models[].name` | `Tsinghua_DeepSeek_v41` | 在 DSH 界面里显示的名字，可自定义。 |
+| `contextWindow` | `1048576` | 实测的最大输入长度。 |
+| `maxTokens` | `131072` | 输出预留额度。 |
+| `input` | `text` + `image` | 声明支持的输入形态。**少写 image 就用不了图片**。 |
+| `reasoningEfforts` | 四个档 | 界面上的思考等级。 |
+| `compat.thinkingFormat` | `openai` | 锁死发送格式，防止被换成端点不认的字段。 |
 
-### 4.1 The context value
+### 4.1 为什么 `maxTokens` 不能也填 1M
 
-The maximum context of the endpoint is **1,048,576 tokens**. This value is the
-sum of the input tokens and the output tokens.
+端点的 1,048,576 是**输入和输出共用一个池子**。如果 `contextWindow` 和
+`maxTokens` 都填 1,048,576，一旦输入接近满额，输入+输出就会超额，网关直接
+返回 HTTP 400。
 
-The value 1,048,576 is a measured value. The endpoint accepted these input
-sizes:
+同时 DSH 的压缩机制要求 `contextWindow > maxTokens + 65536`。
+`maxTokens = 131072` 同时满足这两个条件，也符合主流服务的输出上限惯例。
 
-| Input tokens | Result |
-|---|---|
-| 400,853 | Accepted |
-| 600,919 | Accepted |
-| 1,000,136 | Accepted |
-| more than 1,048,576 | Refused with HTTP 400 |
+### 4.2 上下文长度是实测值
 
-The endpoint gave this message:
+判定方法是**在超长提示词的末尾埋一个哨兵数字**——只有模型真的读到了结尾
+才会答对。这样能区分"真支持"和"静默截断"：
+
+| 目标长度 | 实际输入 token | 结果 |
+|---|---|---|
+| 400K | 400,853 | 通过，尾部哨兵答对 |
+| 600K | 600,919 | 通过，尾部哨兵答对 |
+| **1M** | **1,000,136** | **通过，尾部哨兵答对** |
+| 1.05M 以上 | — | HTTP 400 拒绝 |
+
+网关自己在报错里写明了上限：
 
 ```
 This model's maximum context length is 1048576 tokens
 max_model_len=max_total_tokens=1048576
 ```
 
-The text `reasoning_effort` accepts the values `low`, `high`, and `max`. The
-text `none` stops the thinking. The endpoint refuses the values `minimal`,
-`medium`, and `xhigh`.
+### 4.3 262K 是哪来的
 
-**Note:** The input and the output use the same limit. Do not set the two values
-`contextWindow` and `maxTokens` both to 1,048,576.
+**262,144 不是清华服务器的限制，是 DSH 自己给未知模型的兜底默认值。**
+pi-ai 适配器在已安装目录里查不到我们的模型，就一路回退到这个默认值。
 
-## Section 5: Repair a problem
+所以原来的 262K 是"DSH 的保守假设"，不是测量结果。改配置之后显示的
+1M 才是真实值。
 
-### The model group is not in the model selector
+---
 
-Do these steps:
+## 第 5 节 图像支持
 
-1. Make sure that the entry `llm-pi-ai` is in the patch file.
-2. Make sure that the entry has the field `api: openai-completions` at the
-   **route** level. The field at the model level does not work.
-3. Save the file. The application reads the file again automatically.
-4. Open the model selector again.
+### 5.1 结论：支持，而且是真的看得懂
 
-### The application shows an authentication error
+实测这个端点支持图像输入，而且**真的能理解图像内容**，不是收下就忽略。
 
-The token is not correct or not in the credential store.
+最有说服力的验证是**用已知答案的自制图**去问，让它必须答出只有看到图才能
+答对的东西：
 
-Do these steps:
+| 测试 | 结果 |
+|---|---|
+| 自制图（白底+红竖线+蓝横线+绿色空心圆环），问"圆环是什么颜色" | 答 **Green**（正确） |
+| 真实科研图（1.29 MB），问"有几个子图" | 答 **6**（与图中真实子图数一致） |
+| 1302 / 2048 / 3072 px 三种分辨率 | 全部正确，图像 token 都约 995 |
 
-1. Type this command:
+网关自己的用量账本也承认收到了图：
 
-```powershell
-.\Sync-TsinghuaToken.ps1 -DryRun
+```json
+"prompt_tokens_details": { "multimodal_tokens": { "image": 1003 } }
 ```
 
-2. Look at the line `Time left`. If the value is negative, get a new token.
-3. Make sure that the name in the credential store is
-   `TSINGHUA_DEEPSEEK_API_KEY`. Make sure that the name in the patch file is the
-   same.
-4. Run the script again.
+### 5.2 必须靠配置打开
 
-### The token is refused directly after a new copy
+端点支持不等于 DSH 让你用。**pi-ai 有一道显式闸门**：只有模型声明了
+`input` 里包含 `image`，它才会把图片发上线。而 DSH 侧还有三处检查点：
 
-The token is probably not complete. Do these steps:
-
-1. Copy the token again. Use the **Copy** button of the service page.
-2. Do not use the mouse to select the text. A mouse selection can lose one or
-   two characters.
-3. Put the new text in the token file. Replace the old text fully.
-4. Run the script again.
-
-### The script shows "Could not restrict the file permissions"
-
-This message is not important. Windows needs administrator rights to change the
-access control list of some files. The credential store is already safe for the
-usual configurations.
-
-### The context value is 262K
-
-The value 262,144 is the default value of DSH for an unknown model. Do these
-steps:
-
-1. Make sure that the field `contextWindow` is in the **model** entry. The value
-   must be `1048576`.
-2. Make sure that the entry `llm-pi-ai` is in the patch file.
-3. Close the model selector. Open it again.
-
-### Return to the old configuration
-
-1. Find the backup files. The names end with `.before-tsinghua`.
-2. Copy the backup file over the current file.
-3. Start DSH Desktop again.
-
-## Section 6: Safety rules
-
-Obey these rules:
-
-* Keep the token in the token file and in the credential store only.
-* Do not put the token in the patch file.
-* Do not put the token in a git repository.
-* Do not put the token in a chat message or a log.
-* Make sure that the patch file contains no personal data. A patch file with
-  personal data is not safe to share.
-* Delete an old token file after the token expires.
-
-## Section 7: Technical data
-
-| Item | Value |
+| 检查点 | 没声明 image 时的行为 |
 |---|---|
-| Endpoint | `https://madmodel.cs.tsinghua.edu.cn/v1` |
-| Protocol | OpenAI Chat Completions |
-| Model id at the endpoint | `DeepSeek-V4.1-Flash` |
-| Model name in DSH | `Tsinghua_DeepSeek_v41` |
-| Route id | `tsinghua` |
-| Credential name | `TSINGHUA_DEEPSEEK_API_KEY` |
-| Token life | 24 hours |
-| Maximum context | 1,048,576 tokens |
-| Output limit | 131,072 tokens |
-| Thinking levels | Off, Low, High, Max |
-| Function calling | Supported, streaming and not streaming |
-| Rate limit | 30,000 requests for each minute |
+| `projectImagesForTextModel` | 发请求前把图片**替换成占位文本** |
+| `assertImageCapableRoute`（read 工具） | 拒绝读取图片路径，报 `does not declare image input` |
+| 附件校验（会话控制器） | 报 `MODEL_DOES_NOT_SUPPORT_IMAGES` |
 
-## Glossary
+所以要改的就是这一处：
 
-| Term | Meaning |
+```yaml
+            input:
+              - text
+              - image      # 没有这一行，上面三道闸门都会把图片拦掉
+```
+
+### 5.3 图像 token 的分辨率特性
+
+实测发现图像消耗的 token **与分辨率基本无关**，都封顶在 1000 左右：
+
+| 图像尺寸 | 图像 token |
 |---|---|
-| endpoint | The network address that gives the model service. |
-| effort | The amount of thinking that the model does before the answer. |
-| fingerprint | A short code that identifies a value. The code does not show the value. |
-| JWT | JSON Web Token. The token format of the Tsinghua service. |
-| patch file | The configuration file of the profile. See "Words in this document". |
-| route | The DSH configuration that points to one model service. |
-| token | The login credential of the Tsinghua service. |
+| 1302 × 1302 | 约 995 |
+| 2048 × 2048 | 约 995 |
+| 3072 × 3072 | 约 995 |
+
+而且端点**忽略 `detail: low`** 参数。
+
+**这意味着：提高图片像素预算不会多花 token，只影响画面清晰度。**
+
+因此配置里没有改这条路由默认的图片预算（`requestImagePixelBudget`，
+默认 2048×2048 ≈ 4,194,304 像素；`requestImageMaxBytes` 默认 1 MiB）。
+只有在特别看重细节时才在模型设置页调高。
+
+### 5.4 怎么用
+
+配好之后，直接把图片拖进对话、粘贴截图，或者让 Agent 用工具读图片文件
+都会正常走通。DSH 会把它编码成 data URL 发给端点。
+
+### 5.5 提醒
+
+图片**占用上下文**（每张约 1000 token）。在接近 1M 的长会话里连续贴图，
+会加快触发自动压缩。
+
+---
+
+## 第 6 节 排错
+
+### 模型选择器里没有 Tsinghua DeepSeek 组
+
+1. 确认配置文件里有 `llm-pi-ai` 这一段。
+2. 确认 `api: openai-completions` 写在 **`tsinghua` 路由层**，不是写在
+   `models:` 里面。
+3. 保存文件，应用会自动重载。
+4. 重新打开模型选择器。仍然看不到就重启应用。
+
+### 报认证错误
+
+1. 运行 `.\Sync-TsinghuaToken.ps1 -DryRun`，看 `Time left`。
+2. 如果是负数，去拿新 token。
+3. 确认凭据库里的名字和配置文件里的 `apiKeyEnv` 完全一样。
+4. 重新运行脚本。
+
+### 刚复制的新 token 就被拒绝
+
+多半是 token 不完整。**用页面的"复制"按钮，不要用鼠标拖选**——拖选很容易
+少一个字符。然后把 token 文件里的内容整行替换，重新运行脚本。
+
+（这种错误很隐蔽：少一个字符，JWT 签名就必然失效，表现却和 token 过期一样。）
+
+### 上下文显示 262K
+
+1. 确认 `contextWindow: 1048576` 写在 **`models:` 条目里**。
+2. 关掉模型选择器再打开。
+
+### 图片发不出去
+
+1. 确认 `input:` 列表里同时有 `text` 和 `image`。
+2. 确认这一行写在 **`models:` 条目里**。
+3. 保存后重新打开模型选择器。
+
+### 出现 "Could not restrict the file permissions" 警告
+
+可以忽略。Windows 修改某些文件的访问控制列表需要管理员权限。常规情况下
+凭据库的权限本来就够安全。
+
+### 回滚
+
+把 `.before-tsinghua` 结尾的备份文件覆盖回原文件，然后重启应用。
+
+---
+
+## 第 7 节 安全规则
+
+* token 只放在 token 文件和凭据库里，别的地方都不要放。
+* **不要把 token 写进配置文件。**
+* 不要把 token 提交到 git 仓库。
+* 不要把 token 发到聊天记录或日志里。
+* 确认配置文件里**不含任何个人信息**——它是要被分享和提交的。
+* token 过期后，及时清掉旧 token 文件。
+
+`.gitignore` 已经排除了 `tsinghua_token.txt` 和 `.credentials.yaml`，
+但**不要依赖它**：提交前自己再看一眼。
+
+---
+
+## 第 8 节 技术参数汇总
+
+| 项目 | 值 |
+|---|---|
+| 端点 | `https://madmodel.cs.tsinghua.edu.cn/v1` |
+| 协议 | OpenAI Chat Completions |
+| 端点侧模型 id | `DeepSeek-V4.1-Flash` |
+| DSH 里显示的名字 | `Tsinghua_DeepSeek_v41` |
+| 路由 id | `tsinghua` |
+| 凭据名 | `TSINGHUA_DEEPSEEK_API_KEY` |
+| token 有效期 | 24 小时 |
+| 最大上下文 | 1,048,576 token（输入+输出合计） |
+| 输出上限 | 131,072 token |
+| 思考档位 | Off / Low / High / Max |
+| 函数调用 | 支持（流式与非流式） |
+| 图像输入 | 支持（每张约 1000 token） |
+| 限流 | 30,000 次/分钟 |
+
+---
+
+## 名词表
+
+| 名词 | 意思 |
+|---|---|
+| harness home | DSH 存放数据的目录，通常是 `%USERPROFILE%\.dsh` |
+| profile | 一套 DSH 配置，本文用到的叫 `desktop` |
+| 配置文件 / patch | `cordis.patch.yml`，存放你的配置改动 |
+| 凭据库 | `.credentials.yaml`，存放密钥本体 |
+| 路由（route） | 指向某个模型服务的一条配置 |
+| 端点（endpoint） | 提供模型服务的网络地址 |
+| token | 清华服务的校园身份凭据，24 小时有效 |
+| JWT | token 的格式（JSON Web Token） |
+| Effort | 模型回答前的思考量档位 |
+| 指纹 | 用于识别某个值的一小段代码，不暴露原值 |

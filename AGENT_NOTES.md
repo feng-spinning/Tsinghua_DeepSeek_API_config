@@ -28,6 +28,8 @@ marked *[masked]* were redacted from the source evidence.
 | Output reservation | 131,072 tokens |
 | Thinking levels | `off` / `low` / `high` / `max` |
 | Agent capability | Full — streaming and non-streaming `tool_calls`, multi-turn tool round-trip |
+| Vision | Supported — `input: [text, image]`; images really understood, ~1000 image tokens each |
+| Image budget | route defaults kept: `requestImagePixelBudget` 4,194,304 px, `requestImageMaxBytes` 1 MiB |
 
 Constraints that shaped the design:
 
@@ -117,8 +119,11 @@ The Tsinghua block, verbatim (comments trimmed):
             name: Tsinghua_DeepSeek_v41
             contextWindow: 1048576
             maxTokens: 131072
+            # Without "image" here, three separate gates hide images from this
+            # route even though the endpoint understands them.
             input:
               - text
+              - image
             reasoningEfforts:
               off: none
               low: low
@@ -220,6 +225,7 @@ Method: send the token raw from a file, never retyped. Test list:
 | Streaming `tools` | `text/event-stream`, `delta.tool_calls` fragments assemble correctly |
 | Multi-turn round trip | assistant(`tool_calls`) → `role:tool` result → model consumes and concludes |
 | DSH-shaped tool schema | two parallel calls in one turn (`pwsh` + file read), escaping correct |
+| **Image part (`image_url` with a data URL)** | HTTP 200 — but see Phase 6, this is not yet proof of vision |
 | `system` role | respected |
 | `temperature` / `repetition_penalty` / `top_p` | accepted |
 | Prompt cache | `prompt_tokens_details.cached_tokens` populated |
@@ -402,7 +408,97 @@ records, appended as multiple zstd frames):
 
 Gate 5: **pass** — the running instance resolves 1,048,576 for this route.
 
-### Phase 6 — Maintenance and portability
+### Phase 6 — Vision gate
+
+Question: does the endpoint accept image input, and does the model actually
+understand it?
+
+The HTTP status code alone proves nothing here: a text-only model can accept an
+image part and silently ignore it. The test was therefore built around
+**images whose content is known in advance**, so a correct answer is only
+possible by seeing.
+
+| Test | Result |
+|---|---|
+| Content-part shape `image_url` with a `data:` URL | HTTP 200 |
+| Synthetic image: white field, red vertical lines, blue horizontal lines, green unfilled circle — "what color is the ring?" | answered **Green**; reasoning described "solid red square with a slight gradient at the top" |
+| Real research figure (1.29 MB PNG) — "how many subplots?" | answered **6**, which matches the figure |
+| Resolution sweep 1302 / 2048 / 3072 px | all correct; image tokens ~995 in every case |
+| `detail: low` | ignored (still 1002 image tokens) |
+
+The gateway's own accounting confirms receipt:
+
+```json
+"prompt_tokens_details": { "multimodal_tokens": { "image": 1003 } }
+```
+
+An error body from an invalid content-part type enumerated the accepted types:
+`image_embeds, image_pil, image_url, input_image, …`. So this is native
+endpoint support, not an accident of one request shape.
+
+Shape detail that matters: pi-ai emits `data:<mime>;base64,…`. When an `http`
+URL was sent instead, the gateway tried to fetch it itself. Sending a data URL
+is the supported path and avoids depending on the gateway's network access.
+
+Root cause of the missing capability is again a **deliberate adapter gate**.
+
+```js
+// dsh-llm-pi-ai
+if (hasImages && model.input.includes("image")) { /* only then images go on the wire */ }
+```
+
+With `input: [text]`, three separate enforcement points removed the image:
+
+| Enforcement point | Package | Behavior when `image` is not declared |
+|---|---|---|
+| `projectImagesForTextModel` | `@deepseek-ai/dsh-llm` | projects images into placeholder text **before** the request |
+| `assertImageCapableRoute` | `@deepseek-ai/dsh-llm` | `model "…" does not declare image input` |
+| Attachment validation | `@deepseek-ai/dsh-api-session-controller` | `session/attachment-invalid`, reason `MODEL_DOES_NOT_SUPPORT_IMAGES` |
+
+The client UI localizes the last one (`image.modelUnsupported`), which is the
+message a user would have seen.
+
+Fix: declare the modality.
+
+```yaml
+            input:
+              - text
+              - image
+```
+
+**Endpoint capability and harness permission are different things.** Configuring
+the endpoint is not sufficient; the modality must be declared for the harness to
+let the image through.
+
+Image-token economics, measured: image tokens **plateau near 1000 regardless of
+resolution** (≈995 at 1302, 2048 and 3072 px) and `detail: low` is ignored.
+Raising the pixel budget therefore buys sharpness, not tokens. The route defaults
+were deliberately left unchanged — `requestImagePixelBudget` 4,194,304 px
+(2048×2048) and `requestImageMaxBytes` 1 MiB, versus `deepseek-official`'s
+640,000 px default.
+
+End-to-end proof: a subagent ran on this route and used the `read` tool on a
+generated PNG. The harness's own durable log shows a genuine image block, not a
+placeholder:
+
+```json
+{ "type": "tool/result",
+  "message": { "role": "tool", "content": [
+    { "type": "text", "text": "<type>image</type> … image/png image, 2048x2048 px, 62935 bytes" },
+    { "type": "image",
+      "attachment": { "attachmentId": "sha256:4a2d6b48…b293f8",
+                      "mediaType": "image/png", "width": 2048, "height": 2048 } } ] } }
+```
+
+The model then described exactly what had been drawn: white background, about
+nine red vertical lines and nine blue horizontal lines forming a grid, and a
+green **unfilled, stroked** ring about half the image width. No
+`see attached image` placeholder appeared anywhere in the log, which
+independently shows the image was not downgraded to text.
+
+Gate 6: **pass** — vision declared and proven through DSH's own pipeline.
+
+### Phase 7 — Maintenance and portability
 
 Token refresh moved to the file + script pattern in Section 2. Portability
 verified by inspection: the patch file contains only public values plus a
@@ -426,6 +522,8 @@ from each user's own token.
 | **P9** | A stray web server appeared on port 3080 | Side effect of a probe script | Kill it; never start a second server — the user's GUI is on its own port and must stay untouched |
 | **P10** | Warning "Could not restrict the file permissions" | `Set-Acl` outside the sandbox / without elevation | Treat as non-fatal; the harness provider performs its own permissions check |
 | **P11** | `Bearer ` prefix or surrounding quotes inside the pasted file | Copy-paste variation | The script strips quotes, whitespace, and a leading `Bearer`/`Bearer:` |
+| **P12** | Images never reach the model although the endpoint supports vision | `input: [text]` — pi-ai gates images on `model.input.includes("image")`, and DSH additionally projects images away (`projectImagesForTextModel`), refuses `read` on image paths (`assertImageCapableRoute`), and rejects attachments (`MODEL_DOES_NOT_SUPPORT_IMAGES`) | Declare `input: [text, image]`; endpoint support alone is not permission |
+| **P13** | Vision assumed to be "supported" because a request returned HTTP 200 | A text-only route accepts an image part and ignores it silently | Test with images whose content is known in advance; read `prompt_tokens_details.multimodal_tokens.image` |
 
 ---
 
@@ -451,6 +549,7 @@ llm/listConfigurableProviders  → "routableProviders": ["tsinghua","deepseek-of
 credentials/describe           → TSINGHUA_DEEPSEEK_API_KEY: configured true, source file
 session/modelCatalog           → group tsinghua / Tsinghua_DeepSeek_v41,
                                  reasoning.efforts = off,low,high,max
+                                 and the model must carry image in its modalities
 settings/describe              → effective merged values for llm-pi-ai
 ```
 
@@ -470,6 +569,14 @@ records (zstd-framed, multiple frames per file). Expect:
 Send a message through the route that requires a tool call. A successful tool
 round trip proves the whole chain: credential resolution → protocol → streaming
 tool fragments → agent loop.
+
+For the vision path, a second end-to-end check is required, because tool calling
+and vision fail independently: have the agent `read` a PNG whose content you
+chose, then confirm in the durable log that the tool result carried a real
+`type: "image"` block with an `attachmentId`, and confirm the model described
+what you drew. A `see attached image` placeholder, or an
+`assertImageCapableRoute` / `MODEL_DOES_NOT_SUPPORT_IMAGES` error, means the
+modality declaration did not take effect.
 
 ### 6.5 Effective credential check without printing the secret
 
@@ -556,3 +663,9 @@ Removing the route entirely: delete the `llm-pi-ai` entry (and the
   needs the precise `settings` unset-op schema.
 * **Token cadence:** 24 h. There is no refresh mechanism — the lifecycle is
   manual by design.
+* **Image tokens are resolution-insensitive:** ~1000 per image whether the image
+  is 1302 px or 3072 px, and `detail: low` is ignored. A future endpoint change
+  here would silently change prompt cost, so re-measure if image accounting
+  starts to matter.
+* **Images still consume context:** roughly 1000 tokens each, which accelerates
+  compaction inside a long conversation.

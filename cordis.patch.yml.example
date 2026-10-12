@@ -49,6 +49,20 @@
 # dsh-llm-pi-ai's fallback for undescribed models, not this server's limit.
 # max_tokens is the output reservation: the router counts input + output against
 # that same 1,048,576 ceiling, so the two cannot both equal it.
+#
+# input: [text, image] is measured too. The endpoint accepts the exact shape
+# pi-ai emits (content parts, image_url carrying a data: URL), reports
+# usage.prompt_tokens_details.multimodal_tokens.image ~= 1000, and answers visual
+# questions correctly; its own 400 for an unknown content-part type lists
+# image_url / image_pil / image_embeds / input_image among the supported types.
+# While this list said [text], DSH projected images away before the request
+# (projectImagesForTextModel), the read tool refused image paths
+# (assertImageCapableRoute), and attachments failed with MODEL_DOES_NOT_SUPPORT_IMAGES.
+# Image tokens plateau near 1000 whatever the resolution (verified at 1302, 2048
+# and 3072 px) and the endpoint ignores detail:low, so the route's default
+# requestImagePixelBudget of 2048x2048 is left alone; raise it in the Models page
+# (alongside requestImageMaxBytes for bytes) only if fine detail matters more than
+# request size.
 - id: llm-pi-ai
   config:
     providers:
@@ -63,8 +77,11 @@
             name: Tsinghua_DeepSeek_v41
             contextWindow: 1048576
             maxTokens: 131072
+            # Without "image" here, three separate gates hide images from this
+            # route even though the endpoint understands them.
             input:
               - text
+              - image
             # The adapter omits the reasoning control entirely for a model with
             # no declared reasoning metadata (every hand-declared route), so the
             # four levels must be declared to appear in the UI.
